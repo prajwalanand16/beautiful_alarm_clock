@@ -1,0 +1,432 @@
+// pubspec.yaml
+name: beautiful_alarm_clock
+description: A minimalist alarm clock app.
+version: 1.0.0+1
+
+environment:
+  sdk: '>=2.19.0 <3.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  provider: ^6.0.5
+  sqflite: ^2.2.8
+  path_provider: ^2.0.15
+  android_alarm_manager_plus: ^3.0.0
+  flutter_local_notifications: ^15.1.0+1
+  audioplayers: ^4.1.0
+  google_fonts: ^4.0.4
+  flutter_staggered_animations: ^1.1.1
+  cupertino_icons: ^1.0.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^2.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/sounds/
+
+// main.dart
+import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+import 'package:google_fonts/google_fonts.dart';
+import 'package:flutter_staggered_animations/flutter_staggered_animations.dart';
+import 'package:sqflite/sqflite.dart';
+import 'package:path/path.dart';
+import 'package:android_alarm_manager_plus/android_alarm_manager_plus.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:audioplayers/audioplayers.dart';
+
+// Alarm Model
+class Alarm {
+  int id;
+  TimeOfDay time;
+  String label;
+  String ringtone;
+  bool vibration;
+  List<bool> days; // 7 days
+  bool isOn;
+
+  Alarm({
+    required this.id,
+    required this.time,
+    required this.label,
+    required this.ringtone,
+    required this.vibration,
+    required this.days,
+    required this.isOn,
+  });
+
+  Map<String, dynamic> toMap() {
+    return {
+      'id': id,
+      'hour': time.hour,
+      'minute': time.minute,
+      'label': label,
+      'ringtone': ringtone,
+      'vibration': vibration ? 1 : 0,
+      'days': days.map((e) => e ? 1 : 0).join(','),
+      'isOn': isOn ? 1 : 0,
+    };
+  }
+
+  static Alarm fromMap(Map<String, dynamic> map) {
+    return Alarm(
+      id: map['id'],
+      time: TimeOfDay(hour: map['hour'], minute: map['minute']),
+      label: map['label'],
+      ringtone: map['ringtone'],
+      vibration: map['vibration'] == 1,
+      days: (map['days'] as String).split(',').map((e) => e == '1').toList(),
+      isOn: map['isOn'] == 1,
+    );
+  }
+}
+
+// Alarm Database
+class AlarmDatabase {
+  static final AlarmDatabase instance = AlarmDatabase._init();
+  static Database? _database;
+
+  AlarmDatabase._init();
+
+  Future<Database> get database async {
+    if (_database != null) return _database!;
+    _database = await _initDB('alarms.db');
+    return _database!;
+  }
+
+  Future<Database> _initDB(String filePath) async {
+    final dbPath = await getDatabasesPath();
+    final path = join(dbPath, filePath);
+    return await openDatabase(path, version: 1, onCreate: _createDB);
+  }
+
+  Future _createDB(Database db, int version) async {
+    await db.execute('''
+CREATE TABLE alarms (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  hour INTEGER,
+  minute INTEGER,
+  label TEXT,
+  ringtone TEXT,
+  vibration INTEGER,
+  days TEXT,
+  isOn INTEGER
+)
+''');
+  }
+
+  Future<List<Alarm>> getAlarms() async {
+    final db = await instance.database;
+    final result = await db.query('alarms');
+    return result.map((json) => Alarm.fromMap(json)).toList();
+  }
+
+  Future<int> insert(Alarm alarm) async {
+    final db = await instance.database;
+    return await db.insert('alarms', alarm.toMap());
+  }
+
+  Future<int> update(Alarm alarm) async {
+    final db = await instance.database;
+    return db.update(
+      'alarms',
+      alarm.toMap(),
+      where: 'id = ?',
+      whereArgs: [alarm.id],
+    );
+  }
+
+  Future<int> delete(int id) async {
+    final db = await instance.database;
+    return await db.delete(
+      'alarms',
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+  }
+}
+
+// Alarm Provider
+class AlarmProvider with ChangeNotifier {
+  List<Alarm> _alarms = [];
+  List<Alarm> get alarms => _alarms;
+
+  AlarmProvider() {
+    loadAlarms();
+  }
+
+  Future<void> loadAlarms() async {
+    _alarms = await AlarmDatabase.instance.getAlarms();
+    notifyListeners();
+  }
+
+  Future<void> addAlarm(Alarm alarm) async {
+    alarm.id = await AlarmDatabase.instance.insert(alarm);
+    _alarms.add(alarm);
+    notifyListeners();
+    if (alarm.isOn) scheduleAlarm(alarm);
+  }
+
+  Future<void> updateAlarm(Alarm alarm) async {
+    await AlarmDatabase.instance.update(alarm);
+    int index = _alarms.indexWhere((a) => a.id == alarm.id);
+    if (index != -1) {
+      _alarms[index] = alarm;
+      notifyListeners();
+    }
+    if (alarm.isOn) {
+      scheduleAlarm(alarm);
+    } else {
+      cancelAlarm(alarm.id);
+    }
+  }
+
+  Future<void> deleteAlarm(int id) async {
+    await AlarmDatabase.instance.delete(id);
+    _alarms.removeWhere((a) => a.id == id);
+    notifyListeners();
+    cancelAlarm(id);
+  }
+
+  void scheduleAlarm(Alarm alarm) {
+    // Use android_alarm_manager_plus to schedule
+    AndroidAlarmManager.oneShotAt(
+      DateTime.now().add(Duration(seconds: 10)), // for testing, replace with actual time
+      alarm.id,
+      alarmCallback,
+      exact: true,
+      wakeup: true,
+    );
+  }
+
+  void cancelAlarm(int id) {
+    AndroidAlarmManager.cancel(id);
+  }
+}
+
+void alarmCallback() {
+  // Play sound, show notification
+  FlutterLocalNotificationsPlugin().show(
+    0,
+    'Alarm',
+    'Time to wake up!',
+    NotificationDetails(
+      android: AndroidNotificationDetails(
+        'alarm_channel',
+        'Alarm Notifications',
+        importance: Importance.max,
+        priority: Priority.high,
+        fullScreenIntent: true,
+      ),
+    ),
+  );
+  AudioPlayer().play(AssetSource('sounds/alarm.mp3'));
+}
+
+// Main App
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await AndroidAlarmManager.initialize();
+  FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin = FlutterLocalNotificationsPlugin();
+  const AndroidInitializationSettings initializationSettingsAndroid = AndroidInitializationSettings('@mipmap/ic_launcher');
+  const InitializationSettings initializationSettings = InitializationSettings(android: initializationSettingsAndroid);
+  await flutterLocalNotificationsPlugin.initialize(initializationSettings);
+  runApp(MyApp());
+}
+
+class MyApp extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    return ChangeNotifierProvider(
+      create: (context) => AlarmProvider(),
+      child: MaterialApp(
+        title: 'Beautiful Alarm Clock',
+        theme: ThemeData(
+          brightness: Brightness.dark,
+          primaryColor: Color(0xFF121212),
+          scaffoldBackgroundColor: Color(0xFF121212),
+          colorScheme: ColorScheme.dark(
+            primary: Color(0xFF007AFF),
+            secondary: Color(0xFF007AFF),
+          ),
+          fontFamily: GoogleFonts.inter().fontFamily,
+        ),
+        home: AlarmScreen(),
+      ),
+    );
+  }
+}
+
+// Alarm Screen
+class AlarmScreen extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Text('Alarms'),
+        backgroundColor: Color(0xFF121212),
+      ),
+      body: Consumer<AlarmProvider>(
+        builder: (context, provider, child) {
+          return Column(
+            children: [
+              // Digital Clock
+              Container(
+                height: 200,
+                alignment: Alignment.center,
+                child: Text(
+                  '${DateTime.now().hour}:${DateTime.now().minute.toString().padLeft(2, '0')}',
+                  style: TextStyle(fontSize: 60, color: Colors.white),
+                ),
+              ),
+              Expanded(
+                child: AnimationLimiter(
+                  child: ListView.builder(
+                    itemCount: provider.alarms.length,
+                    itemBuilder: (context, index) {
+                      final alarm = provider.alarms[index];
+                      return AnimationConfiguration.staggeredList(
+                        position: index,
+                        duration: const Duration(milliseconds: 375),
+                        child: SlideAnimation(
+                          verticalOffset: 50.0,
+                          child: FadeInAnimation(
+                            child: Card(
+                              color: Colors.transparent,
+                              elevation: 0,
+                              child: ListTile(
+                                title: Text(
+                                  '${alarm.time.hour}:${alarm.time.minute.toString().padLeft(2, '0')}',
+                                  style: TextStyle(fontSize: 30, color: Colors.white),
+                                ),
+                                subtitle: Text(alarm.label),
+                                trailing: Switch(
+                                  value: alarm.isOn,
+                                  onChanged: (value) {
+                                    alarm.isOn = value;
+                                    provider.updateAlarm(alarm);
+                                  },
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ),
+            ],
+          );
+        },
+      ),
+      floatingActionButton: FloatingActionButton(
+        onPressed: () {
+          // Navigate to add alarm screen
+          Navigator.push(
+            context,
+            MaterialPageRoute(builder: (context) => AddAlarmScreen()),
+          );
+        },
+        child: Icon(Icons.add),
+      ),
+    );
+  }
+}
+
+// Add Alarm Screen
+class AddAlarmScreen extends StatefulWidget {
+  @override
+  _AddAlarmScreenState createState() => _AddAlarmScreenState();
+}
+
+class _AddAlarmScreenState extends State<AddAlarmScreen> {
+  TimeOfDay _time = TimeOfDay.now();
+  String _label = '';
+  String _ringtone = 'default';
+  bool _vibration = true;
+  List<bool> _days = List.filled(7, false);
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Text('Add Alarm'),
+      ),
+      body: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          children: [
+            // Time Picker
+            ElevatedButton(
+              onPressed: () async {
+                TimeOfDay? picked = await showTimePicker(
+                  context: context,
+                  initialTime: _time,
+                );
+                if (picked != null) {
+                  setState(() {
+                    _time = picked;
+                  });
+                }
+              },
+              child: Text('${_time.hour}:${_time.minute.toString().padLeft(2, '0')}'),
+            ),
+            TextField(
+              decoration: InputDecoration(labelText: 'Label'),
+              onChanged: (value) => _label = value,
+            ),
+            // Ringtone selection, etc.
+            Row(
+              children: List.generate(7, (index) {
+                return Checkbox(
+                  value: _days[index],
+                  onChanged: (value) {
+                    setState(() {
+                      _days[index] = value ?? false;
+                    });
+                  },
+                );
+              }),
+            ),
+            SwitchListTile(
+              title: Text('Vibration'),
+              value: _vibration,
+              onChanged: (value) {
+                setState(() {
+                  _vibration = value;
+                });
+              },
+            ),
+            ElevatedButton(
+              onPressed: () {
+                Alarm alarm = Alarm(
+                  id: 0, // will be set in provider
+                  time: _time,
+                  label: _label,
+                  ringtone: _ringtone,
+                  vibration: _vibration,
+                  days: _days,
+                  isOn: true,
+                );
+                Provider.of<AlarmProvider>(context, listen: false).addAlarm(alarm);
+                Navigator.pop(context);
+              },
+              child: Text('Save'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// For AndroidManifest.xml, add:
+// <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+// <uses-permission android:name="android.permission.WAKE_LOCK" />
+// <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
