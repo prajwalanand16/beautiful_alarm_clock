@@ -1,4 +1,4 @@
-package com.example.beautiful_alarm_clock
+package com.prajwalanand.beautiful_alarm_clock
 
 import io.flutter.embedding.android.FlutterActivity
 
