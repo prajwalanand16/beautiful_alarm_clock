@@ -1,4 +1,4 @@
-# Beautiful Alarm Clock
+# Lumina Alarm
 
 A modern, minimalist, and beautiful Flutter alarm clock application.
 
